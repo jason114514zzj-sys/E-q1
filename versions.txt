@@ -1,0 +1,195 @@
+# E题 —— 版本记录
+#
+# 本文件记录【问题一 时序对齐】与【问题三 可解释性情感预测】的版本变更。
+# 每当 config.yaml / config_q3.yaml 中的模型、参数或特征列发生变化，必须在此追加一条，
+# 并注明受影响的样本范围，以便复现和追溯。
+#
+# 问题一 配置文件: config.yaml        版本条目前缀 v1.x
+# 问题三 配置文件: config_q3.yaml     版本条目前缀 q3 v1.x
+# 问题三 运行说明: output/evidence/问题三_运行说明.md
+
+[2026-09-23] v1.0.0  initial
+    tool: q1_alignment
+    mp4_source: 附件1 MOSEI 100 clips (raw, read-only)
+    label_source: label-100.xlsx sheet "label"
+    timing_source: ffprobe (format.duration + frame pts_time)
+    note: |
+      发现 MP4 头部 nb_frames 元数据不可靠：
+      100 条中 90 条虚报帧数，合计虚报 9906 帧 (30%)。
+      因此所有时长与帧时间改由 ffprobe 解码得到，
+      废弃 cv2.CAP_PROP_FRAME_COUNT 路径。
+    affected_samples: all (100)
+
+[2026-09-23] v1.0.1  timing fix
+    change: manifest 时长来源由 frame_count/fps 改为 ffprobe
+    affected_samples: all (100)
+    reason: |
+      旧算法用元数据帧数除以帧率，导致时长虚高，最大 3.27 倍。
+      对齐结果被系统性压缩，且每条样本偏差比例不同。
+
+[2026-09-23] v1.1.0  constrained monotonic alignment
+    change: 对齐后端由 energy(VAD分段) 改为 monotonic(约束式)
+    affected_samples: all (100)
+    reason: |
+      v1.0 的 energy 后端按"每个有声段独立分配词"，当有声段多而词数少时，
+      早期段消耗完全部词，后续段分到 0 个词被跳过。
+      实测覆盖率中位数仅 41.7%，最低 7.5%（-iRBcNs9oI8$_$9：
+      3.42s 视频 5 个词仅覆盖 0.26s，等价 19.4 词/秒）。
+      该缺陷通过了全部结构性校验（单调、有限、在时长内），
+      因此 v1.0 的 QC 未能发现，属于校验盲区。
+    fix: |
+      1. 新增 monotonic_align.py：在 [0, duration] 全局求解词边界，
+         硬约束保证完整覆盖、严格单调、语速合理；
+      2. 边界向声学能量谷吸附（停顿感知）；
+      3. 词时长权重改用音节数（元音组）而非字符数；
+      4. QC 新增覆盖率与语速两项硬校验。
+    verification:
+      coverage_median: 0.417 -> 1.000
+      coverage_min: 0.075 -> 1.000
+      samples_below_90pct: 83 -> 0
+      pause_snapping_energy_reduction: 21.95%  (40/40 samples improved)
+      tests: 15 -> 28 (all passing)
+
+[2026-09-24] v1.2.0  mask-aware text pooling
+    change: |
+      文本特征由"50 步直接平均"改为"text_bert 注意力掩码池化"；
+      新增 src/q1_alignment/text_pooling.py 作为唯一入口。
+    affected_samples: all (4850)  # train 3395 + valid 728 + test 727
+    reason: |
+      附件2 的 text (N,50,768) 全表**没有任何零值**——缺失位置用的是
+      非零填充（非零部分 mean=-0.0102, std=0.4594）。
+      因此 x==0 永远检测不到文本填充，直接对 50 步取平均会把填充垃圾
+      平均进特征。
+      量化损失（相对 L2 误差 ||naive-masked||/||masked||）：
+        train n=3395 : mean=0.4343  max=1.1189   cos 均值 0.8769 最低 0.4056
+        valid n=728  : mean=0.4127  max=0.9973
+        test  n=727  : mean=0.4235  max=0.9659
+      且误差集中在短样本上（有效步数比例 <0.2 的 254 条：相对误差 0.7845，
+      cos 仅 0.6903）——即错误被系统性地施加在信息量最少的样本上。
+    fix: |
+      1. 新增 text_pooling.py：
+         extract_attention_mask() 自动定位 text_bert 的 0/1 掩码通道；
+         masked_mean_pool() 只在有效步上求均值，零有效步返回零向量（不产生 NaN）；
+         pool_text_sequence() 默认走 masked 路线；
+         method="naive" 仅供消融对照，且强制发 RuntimeWarning。
+      2. 附件3 只有 text_bert 没有 text，pool_text_sequence 会明确抛错，
+         要求改走 BERT 编码器路径，避免静默产出错误形状。
+      3. guard_check 新增 C7：实时复算上述误差，并断言"text 无零"这一假设仍成立；
+         C2 由"建议"升级为硬约束（dim0 量纲比实测约 117.6×）。
+    verification:
+      text_bert_channel_semantics: "ch0=词id(0..29824), ch1=0/1掩码(mean 0.4929), ch2=恒零"
+      mask_type: 纯尾部填充（内部零出现于 0/3395 样本）
+      valid_steps_percentiles: [min=3, p25=16, p50=22, p75=32, max=50]
+      real_data_validation: train/valid/test 三个 split 全部通过（finite, shape, trap 断言）
+[2026-09-24] v1.3.0  per-dimension feature scaling + interface contract fix
+    change: |
+      新增 src/q1_alignment/feature_scaling.py（逐维标准化，唯一入口）；
+      handoff/交付接口规格_冻结版.md 增加第十节「逐模态时间掩码」；
+      guard_check 新增 C8（标准化的可执行验证）与 A6（附件3/4 嵌套差异）。
+    affected_samples: all (4850)
+    reason: |
+      audio 的 dim0 量纲与其余 73 维差两个数量级。
+      实测（train，仅有效步 76817）：
+        原始量纲比（99 分位绝对值）        = 118x
+        标准差异比（std）                  = 394x   <-- 真正起作用的量
+        全局标准化后 dim0/其余维 std 比     = 394.3x
+        逐维标准化后                       = 1.000x
+      即"整表统一 z-score"并不能解决问题，dim0 仍然主导距离与融合表示。
+    fix: |
+      1. fit_scaler() 只在 train 上拟合、逐维计算 mean/std，
+         自动排除全零填充步，std 下限 eps 防止常数维产生 inf/NaN；
+      2. transform() 保证填充位置输出恒为 0（不打乱缺失约定）；
+      3. C8 在 guard 中实时复算两个比值，回归即失败。
+    verification:
+      std_ratio_before: 394.3
+      std_ratio_after: 1.000
+      train_valid_test_scale_consistent: true
+      cross_split_check: "valid/test 用 train 统计量后 各维|均值|max=0.082/0.129，std 中位=0.980/0.992"
+      tests: 90 -> 109 (all passing, +19 in test_feature_scaling.py)
+      guard: 通过 20 / 未通过 0 / 需人工 12
+    interface_note: |
+      附件3 与附件4 的嵌套层级不同（A6）：
+        附件3 = {'test': {'audio': (1,50,74), ...}}   # 外层键 + 批量维
+        附件4 = {'audio': (50,74), ...}               # 无外层键、无批量维
+      写成统一 loader 会让其中一个静默返回 0 条样本（本次已实际发生）。
+
+
+# ======================================================================
+# 问题三 可解释性情感预测 —— 版本记录
+# 配置文件: config_q3.yaml　　运行说明: output/evidence/问题三_运行说明.md
+# 代码: src/q3_explain/　　提交文件: output/q3/附件4_预测与解释结果.csv
+# ======================================================================
+
+[2026-09-24] q3 v1.0.0  initial
+    tool: q3_explain
+    feature_source: 附件2 aligned_50.pkl（train 3395 / valid 728；test 不参与任何选择）
+    inference_source: 附件4 对齐版 20 条 pkl + 20 个 mp4（read-only）
+    config: hidden 96 / epochs 60 / patience 12 / lr 1.5e-3 / wd 1e-4 / batch 128
+            lambda_reg 1.0 / modality_dropout 0.1 / seed 20260924
+    loss: CE_w(极性) + 1.0 * MSE(强度)
+    selection: 按验证集 macro-F1 选最佳 epoch（实测第 8 轮，第 20 轮早停）
+    affected_samples: 4850（训练/验证）+ 20（附件4 推理）
+    result: |
+      附件2 验证集：Accuracy 0.6360 / Macro-F1 0.6184 / MAE 0.6214 / Pearson 0.6282
+      基线：多数类 0.4643 / 0.2114；训练集均值回归 MAE 0.7808
+      混淆矩阵（行=真值 neg/neu/pos）：[139,35,32] / [32,91,61] / [36,69,233]
+      各类召回：0.6748 / 0.4946（瓶颈）/ 0.6893
+    interpretability: |
+      内在可解释（非事后解释）：每模态独立编码器 → 时间注意力（无效位 -inf）→ 模态门控 → 双头
+      门控对不可用模态的 logits 硬置 -inf（硬约束，不是正则）
+      两项可复核检验：遮蔽检验（top3 vs 随机3）与留一模态扰动 LOMO
+    verification:
+      faithfulness: text +0.2574（86.5%）/ audio +0.0045（63.0%）/ vision +0.0271（71.7%）
+      gate_vs_lomo_agreement: 15/20（5 条不一致已在解释卡标注）
+      attachment4_dominant_modality: {text: 18, vision: 2}
+      attachment4_polarity: {neutral: 7, positive: 7, negative: 6}
+    note: |
+      开发中修正的一个实质缺陷：在附件2 验证集上，15 条 vision 整条缺失的样本被门控
+      赋了平均 0.287 的 vision 权重（高于全体平均 0.227），导致"主要参考模态 = vision"
+      这种荒谬解释。修正为门控 logits 硬置 -inf。
+    guard: 通过 35 / 未通过 1（F9 缺 output/q2）/ 需人工 14
+
+[2026-09-25] q3 v1.0.1  evidence-time fix（**重要更正**）
+    change: |
+      【更正】证据时间由 j*D/50 均匀切分改为**词级强制对齐**。
+      新增 src/q3_explain/evidence_time.py；run_all.py 接入时间映射；
+      guard_check 新增 G6（证据时间有据可依）与 D5（附件4 整模态无数据样本）；
+      新增 G7（交付 CSV 无 BOM）。
+    affected_samples: 附件4 全部 20 条（证据时间列与解释卡）
+    reason: |
+      此前文档写"位置 j ↔ [j*D/50, (j+1)*D/50]（已验证）"，但该式**从未被检验**。
+      实测这 50 个位置是**词片段轴**而不是等长时间片：
+        20/20 条满足「text_bert 掩码长度 = 音频有效位置数 + 2」，偏移恒为 2，corr = 1.000
+        音频有效位置数 11~48（不是恒为 50），上限 48 与 config.yaml 的 content_slots 吻合
+      均匀切分与词级对齐的偏差：
+        均值 1.968 s、最大 3.627 s；最差样本 15 号 5.680 s vs 2.053 s（2.77 倍）
+      危害等级高：题面段029/017 要求关键证据"可回看至原始片段"，
+      而评阅人会真的点开视频核对，指错 2.77 倍即一眼假。
+    fix: |
+      1. evidence_time.py：ffmpeg 解码 16 kHz 单声道 → 10 ms 一跳 RMS 能量包络 →
+         约束式单调强制对齐（复用 q1_alignment.monotonic_align）
+      2. run_all.py 从 work/q3/att4_time_map.json 取证据时间；解释卡同时写出
+         "被否掉的均匀估计值"以便复核
+      3. guard G6 逐行检查 CSV 时间是否锚定真实词边界（容差 0.02 s）、是否越界、
+         覆盖率是否 ≥0.9，并**独立重算**"偏移恒定"不变量
+    verification:
+      coverage: 20/20 条 = 1.000
+      rate_wps: 1.80 – 4.01 词/秒（全部从 0.000 s 起）
+      g6_result: 锚定词边界 20/20；越界/离格 0；覆盖率<0.9 的 0 条；偏移恒为 2
+      uniform_split_error: {mean_abs_s: 1.9682, max_abs_s: 3.6271, worst: "样本15 2.766 倍"}
+    residual_limitation: |
+      本机无 BERT 分词器 → 子词→词为按比例近似（比值约 1.2，通常误差 ≤1 词）。
+      但**每个词自身的起止时间是真实强制对齐结果**，秒级定位不依赖任何均匀假设。
+    side_findings: |
+      D5：附件4 样本 13 的视觉特征在对齐版 50 个位置全为零、未对齐版仅 17/500 非零，
+          与题面段017「附件4 三模态信息完整」**矛盾**；门控 -inf 硬掩码实测该模态权重为 0。
+      E5：封堵第三类假阳性（引用 E5 自身诊断输出中的 @lineNNN 被当成取值）。
+    deliverables_added:
+      - handoff/att4_position_time_map/（position_time_map.csv 564 行 + att4_time_map.json + README.md）
+      - output/evidence/问题三方案校验报告.md（题面 25 项要求逐条核对）
+      - config_q3.yaml（问题三冻结配置）
+      - output/evidence/问题三_运行说明.md（段055 要求的详细运行说明）
+    guard: 通过 42 / 未通过 0 / 需人工 13（历史上首次零红灯）
+
+
+

@@ -1,0 +1,99 @@
+# ==========================================================
+# 问题一 时序对齐 —— 冻结配置
+# ==========================================================
+# 本文件固定处理参数。修改后必须重新处理受影响的样本，
+# 并把新版本号写入 versions.txt。
+# ==========================================================
+
+project: q1_alignment
+version: "1.0.0"
+frozen: false          # 3条联调通过后置为 true
+
+# ---------------- 样本 ----------------
+samples:
+  dataset: CMU-MOSEI 子集
+  expected_count: 100
+  id_separator: "$_$"
+  id_separator_safe: "__"
+  label_file: "label-100.xlsx"
+  label_sheet: "label"
+
+# ---------------- 时间基准 ----------------
+# 关键：本数据集的 MP4 nb_frames 元数据不可靠
+# （100条中90条虚报，合计虚报 30% 帧数），
+# 因此时长与帧时间一律由 ffprobe 解码得到。
+timing:
+  source: ffprobe
+  duration_field: "format.duration"
+  frame_time_field: "pts_time"
+  trust_nb_frames: false
+  time_unit: seconds
+  origin: video_start_zero
+
+# ---------------- 对齐 ----------------
+alignment:
+  max_positions: 50
+  content_slots: 48        # 位置 0 给 [CLS]，末位给 [SEP]
+  strategy: word_interval  # 以逐词时间区间为主时间轴
+  frame_assignment: center_in_interval   # 帧中心落入 [start, end)
+  aggregation: mean        # 多帧取均值
+  empty_policy: zero_with_mask           # 空区间填零并置 mask=0
+  long_text_merge: uniform_contiguous    # 超48词按顺序均匀合并
+
+# ---------------- 强制对齐 ----------------
+forced_alignment:
+  method: monotonic        # monotonic | energy | ctc
+  # monotonic: 约束式单调对齐（默认）
+  #   覆盖率、单调性、语速合理性由构造保证
+  #   energy 为初版实现，覆盖率中位仅 42%，仅保留作消融对比
+  sample_rate: 16000
+  frame_ms: 25.0
+  hop_ms: 10.0
+  # --- monotonic 专用 ---
+  pause_weight: 0.5        # 边界向能量谷吸附的强度 (0=关闭)
+  pause_window_sec: 0.08   # 吸附搜索窗口
+  min_span_sec: 0.02       # 最小词时长
+  rate_min_wps: 1.0        # 语速合理下界（词/秒）
+  rate_max_wps: 6.0        # 语速合理上界（词/秒）
+  # --- energy 专用（已弃用，仅供消融） ---
+  vad_threshold_ratio: 0.12
+  vad_min_silence_sec: 0.12
+  ctc_bundle: WAV2VEC2_ASR_BASE_960H  # 需要联网下载，服务器不可用
+
+# ---------------- 输出 ----------------
+outputs:
+  arrays_dtype: float32
+  mask_dtype: uint8
+  save_compressed: true
+  required_masks:
+    - sequence_mask
+    - text_mask
+    - audio_mask
+    - vision_mask
+  trace_columns:
+    - position
+    - start_sec
+    - end_sec
+    - words
+    - audio_frame_range
+    - vision_frame_range
+    - vision_valid_ratio
+
+# ---------------- 环境 ----------------
+environment:
+  conda_env: mosei
+  python: "3.10"
+  torch: "2.4.1+cu121"     # V100 (sm_70) 上限版本
+  device: cuda
+
+# ---------------- 质量检查 ----------------
+qc:
+  require_monotonic_time: true
+  require_finite: true
+  require_binary_masks: true
+  require_zero_on_masked: true
+  tolerance_sec: 0.05
+  # 以下两项为覆盖率缺陷事件后新增的硬校验
+  require_coverage: 0.90        # 对齐区间须覆盖 ≥90% 时长
+  max_words_per_second: 6.0     # 语速须在生理合理范围内
+  fail_on_any_issue: false   # true 时 audit 返回非零退出码

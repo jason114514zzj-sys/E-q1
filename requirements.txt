@@ -1,0 +1,47 @@
+# ==========================================================
+# E题 多模态情感识别 —— 服务器环境依赖
+# 目标机器: server (Tesla V100-PCIE-16GB, sm_70)
+# Python 3.10 / CUDA 11.8 runtime (pip 轮子自带)
+# ==========================================================
+# ⚠️ 关键约束：V100 是 Volta 架构 (compute capability 7.0)
+#    PyTorch >= 2.5 的官方 wheel 已移除 sm_70 内核，
+#    装上会报 "no kernel image is available for execution"。
+#    因此必须锁定 torch==2.4.1。
+# ==========================================================
+
+# ---- 深度学习框架 ----
+torch==2.4.1
+torchvision==0.19.1
+torchaudio==2.4.1
+
+# ---- 科学计算 ----
+numpy==2.2.6
+pandas==2.3.3
+scipy==1.15.3
+scikit-learn==1.7.2
+
+# ---- 可视化与绘图 ----
+matplotlib==3.10.9
+seaborn==0.13.2
+
+# ---- 数据读写 ----
+openpyxl==3.1.5
+h5py==3.16.0
+joblib==1.6.0
+tqdm==4.70.1
+
+# ---- 音频 / 视频 ----
+librosa==0.11.0
+soundfile
+opencv-python-headless==5.0.0
+imageio
+imageio-ffmpeg
+scikit-image
+Pillow==12.3.0
+
+# ---- 深度模型工具 ----
+timm==1.0.30
+einops==0.8.2
+easydict==1.13
+huggingface_hub
+safetensors

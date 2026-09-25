@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+data/
+output/
+work/
+*.mp4
+*.wav
+*.pkl
+*.npy
+*.npz
+*.pt
+*.zip
