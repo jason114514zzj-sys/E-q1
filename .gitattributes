@@ -1,0 +1,10 @@
+# 本仓库随附逐文件 sha256 清单（提交材料包内），因此**禁止任何行尾转换**：
+# 文件在存储与检出时保持逐字节不变，否则在 Windows 上 clone 得到 CRLF、哈希对不上。
+* -text
+
+# 显式标为二进制的类型
+*.png  binary
+*.zip  binary
+*.npy  binary
+*.npz  binary
+*.mp4  binary
